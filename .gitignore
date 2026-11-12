@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.dylib
+*.so
+*.out
+
+# Standalone local binaries
+bench_e4b
+inspect_e4b
+time_output
+
+# macOS metadata
+.DS_Store
+._*
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Model weights and temporary files
+*.gguf
+*.safetensors
+*.bin
+*.log
