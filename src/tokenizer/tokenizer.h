@@ -1,0 +1,100 @@
+// Byte-level BPE tokenizer for HF tokenizer.json files: GPT-2 byte-to-unicode mapping, ranked merges, added
+// tokens; Qwen2/3/3.5's pre-tokenizer split with NFC normalization, the Tekken split (Mistral, Nemotron 3.5: no
+// normalization, cased letter runs, single digits) with whole-word vocabulary hits first (ignore_merges), or Flint's
+// (Recursive: no normalization, digits in threes, CJK and kana runs, cased letter runs with their contractions).
+#pragma once
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace ni::gguf {
+class File;
+}
+
+namespace ni {
+
+class Tokenizer {
+ public:
+  void load(const std::string& tokenizer_json);
+  bool load_from_gguf(const ni::gguf::File& f);
+  // Added tokens (e.g. <|im_start|>) in `text` are always recognized, as HF tokenizers do.
+  // With `split_index`: when an added token starts exactly at byte `split_at`, *split_index is set
+  // to the number of ids before it, which equals encode(text.substr(0, split_at)).size() with those
+  // ids as a prefix (text between added tokens is encoded independently); else left unchanged.
+  std::vector<int> encode(const std::string& text, size_t split_at = std::string::npos,
+                          int* split_index = nullptr) const;
+  std::string decode(const std::vector<int>& ids, bool include_special = false) const;
+  // Raw bytes of one token (may be a partial UTF-8 sequence).
+  const std::string& token_bytes(int id) const;
+  int find(const std::string& token) const; // -1 if absent
+  int vocab_size() const { return int(id_to_bytes_.size()); }
+  bool is_special(int id) const;
+  // An added token (tokenizer.json's added_tokens: <|im_end|>, <think>, <tool_call> ...): matched whole, never text
+  bool is_added(int id) const;
+  const std::string& chat_template() const { return chat_template_; }
+  int bos_id() const { return bos_id_; }
+  int eos_id() const { return eos_id_; }
+  const std::vector<int>& eos_ids() const { return eos_ids_; }
+  bool is_eos(int id) const {
+    for (int e : eos_ids_) if (id == e) return true;
+    return false;
+  }
+  // Flint's pre-tokenizer: the regexes of its tokenizer.json's three Isolated splits (before a ByteLevel without its
+  // regex), which select Split::Flint (the GGUF importer writes them)
+  static const char* const kFlintSplit[3];
+
+ private:
+  void bpe(const std::string& word, std::vector<int>& out) const;
+  void encode_plain(const std::string& text, std::vector<int>& out) const;
+
+  std::unordered_map<std::string, int> vocab_;        // byte-level string -> id
+  std::vector<std::string> id_to_bytes_;              // id -> raw bytes
+  std::unordered_map<uint64_t, std::pair<int, int>> merges_; // (a,b) -> (rank, merged id)
+  std::vector<std::pair<std::string, int>> added_;    // content -> id, longest first
+  std::vector<bool> special_;
+  std::vector<bool> added_id_;
+  int byte_id_[256];
+  std::string chat_template_;
+  int bos_id_ = 2;
+  int eos_id_ = 1;
+  std::vector<int> eos_ids_ = {1, 106};
+  bool add_bos_ = false;
+ public:
+  enum class Split {
+    Qwen,      // (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+    Tekken,    // Mistral / Nemotron 3.5
+    Gpt2,      // 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+  (Nemotron-H / StarCoder2)
+    Flint,     // Split([^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+..., Digits(individual))
+    Mellum,    // Sequence(Digits(individual_digits=true), ByteLevel(use_regex=true))
+    Gemma4,    // SentencePiece SPM BPE with \xe2\x96\x81 space escaping and newline pre-tokenization
+  };
+  Split split() const { return split_; }
+
+ private:
+  Split split_ = Split::Qwen;
+  bool nfc_ = true;             // NFC-normalize the text first (Qwen; Tekken and Flint have no normalizer)
+  bool ignore_merges_ = false;  // a word found whole in the vocabulary is one token (HF BPE ignore_merges)
+  mutable std::unordered_map<std::string, std::vector<int>> cache_;
+  mutable std::mutex cache_mu_;
+};
+
+// `s` with every ill-formed UTF-8 subsequence replaced by U+FFFD (one per maximal subpart, as Python's
+// decode(errors="replace")): JSON can carry nothing else.
+std::string utf8_valid(const std::string& s);
+
+// Incremental UTF-8-safe detokenizer: feeds token ids, emits only complete, well-formed UTF-8 text. A sequence the
+// generation cut off (flush) or the model wrote ill-formed comes out as U+FFFD.
+class StreamDecoder {
+ public:
+  explicit StreamDecoder(const Tokenizer& t) : tok_(t) {}
+  std::string push(int id);
+  std::string flush();
+
+ private:
+  const Tokenizer& tok_;
+  std::string pending_;
+};
+
+} // namespace ni
